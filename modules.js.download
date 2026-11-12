@@ -1,0 +1,1880 @@
+"use strict";
+
+window.TERRON_MODULES = (() => {
+
+  // ==========================================
+  // WORKSPACE
+  // ==========================================
+
+  const root = document.createElement("section");
+  root.id = "dataWorkspace";
+  root.className = "data-workspace";
+  root.hidden = true;
+
+  const pageNames = {
+    weather: "Weather Intelligence",
+    disasters: "Disaster Intelligence",
+    environment: "Environmental Intelligence",
+    forest: "Forest & Nature",
+    ocean: "Ocean Intelligence",
+    agriculture: "Agriculture Intelligence",
+    atmosphere: "Atmosphere Intelligence",
+    analytics: "Advanced Analytics",
+    comparison: "Global Location Comparison",
+    mission: "Mission Control",
+    earth: "Earth Observation"
+  };
+
+  let currentEventRecords = [];
+  let eventMap = null;
+  let eventMapLayer = null;
+
+  // ==========================================
+  // HELPERS
+  // ==========================================
+
+  function escapeHTML(input) {
+    return String(input ?? "").replace(/[&<>"']/g, char => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;"
+    })[char]);
+  }
+
+  function value(data, key, unit = "") {
+    const result = data?.[key];
+
+    if (
+      result === null ||
+      result === undefined ||
+      !Number.isFinite(Number(result))
+    ) {
+      return "Unavailable";
+    }
+
+    return `${Number(result).toFixed(1)} ${unit}`.trim();
+  }
+
+  function card(label, reading, note = "") {
+    return `
+      <article class="metric-card">
+        <div class="metric-top">${escapeHTML(label)}</div>
+        <strong class="metric-value">${escapeHTML(reading)}</strong>
+        <div class="metric-foot">${escapeHTML(note)}</div>
+      </article>
+    `;
+  }
+
+  function sourceStatus(source, label) {
+    if (!source) {
+      return `<p class="data-error">${escapeHTML(label)} data has not loaded.</p>`;
+    }
+
+    if (!source.ok) {
+      return `<p class="data-error">${escapeHTML(label)} unavailable: ${escapeHTML(source.error || "Unknown error")}</p>`;
+    }
+
+    return `
+      <p class="data-success">
+        Connected · Updated ${escapeHTML(
+          source.updatedAt
+            ? new Date(source.updatedAt).toLocaleString()
+            : "Time unavailable"
+        )}
+      </p>
+    `;
+  }
+
+  function formatEventDate(date) {
+    if (!date) return "Unavailable";
+
+    const parsed = new Date(date);
+
+    return Number.isNaN(parsed.getTime())
+      ? "Unavailable"
+      : parsed.toLocaleString();
+  }
+
+  // ==========================================
+  // WEATHER INTELLIGENCE
+  // ==========================================
+
+  function weatherView(data) {
+    const source = data.location?.weather;
+    const d = source?.data;
+    const c = d?.current;
+
+    if (!source?.ok) return sourceStatus(source, "Weather");
+
+    return `
+      ${sourceStatus(source, "Weather")}
+
+      <div class="metrics-grid">
+        ${card("TEMPERATURE", value(c, "temperature_2m", "°C"), "Model-based current condition")}
+        ${card("FEELS LIKE", value(c, "apparent_temperature", "°C"))}
+        ${card("HUMIDITY", value(c, "relative_humidity_2m", "%"))}
+        ${card("WIND SPEED", value(c, "wind_speed_10m", "km/h"))}
+        ${card("PRECIPITATION", value(c, "precipitation", "mm"))}
+        ${card("PRESSURE", value(c, "surface_pressure", "hPa"))}
+        ${card("CLOUD COVER", value(c, "cloud_cover", "%"))}
+        ${card("WIND DIRECTION", value(c, "wind_direction_10m", "°"))}
+      </div>
+
+      <h3 class="data-heading">Five-day forecast</h3>
+      ${dailyTable(d?.daily)}
+
+      <p class="data-footnote">
+        Source: Open-Meteo. Weather-model output, not a direct local weather-station measurement.
+      </p>
+    `;
+  }
+
+  function dailyTable(daily) {
+    if (!daily?.time?.length) {
+      return `<p class="data-error">Daily forecast unavailable.</p>`;
+    }
+
+    return `
+      <div class="table-scroll">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Maximum</th>
+              <th>Minimum</th>
+              <th>Precipitation</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${daily.time.map((day, i) => `
+              <tr>
+                <td>${escapeHTML(day)}</td>
+                <td>${value({v: daily.temperature_2m_max?.[i]}, "v", "°C")}</td>
+                <td>${value({v: daily.temperature_2m_min?.[i]}, "v", "°C")}</td>
+                <td>${value({v: daily.precipitation_sum?.[i]}, "v", "mm")}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  // ==========================================
+  // ENVIRONMENTAL INTELLIGENCE
+  // ==========================================
+
+  function environmentView(data) {
+    const source = data.location?.air;
+    const c = source?.data?.current;
+
+    if (!source?.ok) return sourceStatus(source, "Air quality");
+
+    return `
+      ${sourceStatus(source, "Air quality")}
+
+      <div class="metrics-grid">
+        ${card("EUROPEAN AQI", value(c, "european_aqi"), "European index")}
+        ${card("US AQI", value(c, "us_aqi"), "US index")}
+        ${card("PM2.5", value(c, "pm2_5", "µg/m³"))}
+        ${card("PM10", value(c, "pm10", "µg/m³"))}
+        ${card("NITROGEN DIOXIDE", value(c, "nitrogen_dioxide", "µg/m³"))}
+        ${card("OZONE", value(c, "ozone", "µg/m³"))}
+        ${card("CARBON MONOXIDE", value(c, "carbon_monoxide", "µg/m³"))}
+        ${card("SULPHUR DIOXIDE", value(c, "sulphur_dioxide", "µg/m³"))}
+      </div>
+
+      <p class="data-footnote">
+        Source: Open-Meteo CAMS air-quality model. These are model estimates, not measurements from a local monitoring station.
+      </p>
+    `;
+  }
+
+  // ==========================================
+  // PHASE 4E — EVENT DATA NORMALIZATION
+  // ==========================================
+
+  function collectGlobalEvents(data) {
+    const records = [];
+
+    const earthquakeSource = data.global?.earthquakes;
+    const nasaSource = data.global?.events;
+
+    const earthquakes = earthquakeSource?.data?.features || [];
+    const nasaEvents = nasaSource?.data?.events || [];
+
+    earthquakes.forEach((feature, index) => {
+      const coordinates = feature.geometry?.coordinates;
+
+      if (!Array.isArray(coordinates) || coordinates.length < 2) {
+        return;
+      }
+
+      const longitude = Number(coordinates[0]);
+      const latitude = Number(coordinates[1]);
+      const properties = feature.properties || {};
+      const timestamp = Number(properties.time);
+
+      if (
+        !Number.isFinite(latitude) ||
+        !Number.isFinite(longitude) ||
+        latitude < -90 ||
+        latitude > 90 ||
+        longitude < -180 ||
+        longitude > 180
+      ) {
+        return;
+      }
+
+      records.push({
+        id: `earthquake-${feature.id || index}`,
+        source: "USGS",
+        type: "earthquake",
+        title: properties.place || "Earthquake",
+        category: "Earthquake",
+        latitude,
+        longitude,
+        magnitude: Number.isFinite(Number(properties.mag))
+          ? Number(properties.mag)
+          : null,
+        timestamp: Number.isFinite(timestamp) ? timestamp / 1000 : null,
+        url: properties.url || "",
+        depth: Number.isFinite(Number(coordinates[2]))
+          ? Number(coordinates[2])
+          : null
+      });
+    });
+
+    nasaEvents.forEach((event, index) => {
+      const geometry = event.geometry || [];
+      const latest = geometry.length
+        ? geometry[geometry.length - 1]
+        : null;
+
+      const coordinates = latest?.coordinates;
+
+      if (
+        !Array.isArray(coordinates) ||
+        coordinates.length < 2 ||
+        latest?.type !== "Point"
+      ) {
+        return;
+      }
+
+      const longitude = Number(coordinates[0]);
+      const latitude = Number(coordinates[1]);
+      const parsedDate = new Date(latest.date).getTime();
+
+      if (
+        !Number.isFinite(latitude) ||
+        !Number.isFinite(longitude) ||
+        latitude < -90 ||
+        latitude > 90 ||
+        longitude < -180 ||
+        longitude > 180
+      ) {
+        return;
+      }
+
+      const category = event.categories
+        ?.map(item => item.title)
+        .join(", ") || "Natural event";
+
+      records.push({
+        id: `nasa-${event.id || index}`,
+        source: "NASA EONET",
+        type: "nasa",
+        title: event.title || "Natural event",
+        category,
+        latitude,
+        longitude,
+        magnitude: null,
+        timestamp: Number.isFinite(parsedDate)
+          ? parsedDate / 1000
+          : null,
+        url: event.sources?.[0]?.url || "",
+        depth: null
+      });
+    });
+
+    return records.sort((a, b) =>
+      (b.timestamp || 0) - (a.timestamp || 0)
+    );
+  }
+
+  // ==========================================
+  // PHASE 4E — NORMAL GEOGRAPHICAL WORLD MAP
+  // ==========================================
+
+  function buildEventHeatmap(records) {
+    return `
+      <div class="terron-heatmap-shell">
+
+        <div class="terron-heatmap-heading">
+          <div>
+            <h3>Global Event Map</h3>
+            <p>Earthquake and natural-event locations across the world</p>
+          </div>
+
+          <span class="terron-heatmap-count">
+            ${records.length} EVENTS
+          </span>
+        </div>
+
+        <div
+          id="terronEventMap"
+          class="terron-event-map"
+          role="application"
+          aria-label="Interactive geographical world map">
+        </div>
+
+        <div class="terron-heatmap-legend">
+          <span>
+            <i class="heat-legend earthquake"></i>
+            Earthquakes
+          </span>
+
+          <span>
+            <i class="heat-legend nasa"></i>
+            NASA natural events
+          </span>
+        </div>
+
+        <p class="data-footnote">
+          Markers show reported event locations. Circle highlights are visual
+          indicators, not measured event-intensity areas.
+        </p>
+
+      </div>
+    `;
+  }
+
+  function initializeEventMap(records) {
+    const container = document.getElementById("terronEventMap");
+
+    if (!container) return;
+
+    if (typeof L === "undefined") {
+      container.innerHTML = `
+        <p class="data-error">
+          Leaflet is unavailable. Check your internet connection and
+          the Leaflet JavaScript and CSS files in index.html.
+        </p>
+      `;
+      return;
+    }
+
+    if (eventMap) {
+      eventMap.remove();
+      eventMap = null;
+      eventMapLayer = null;
+    }
+
+    eventMap = L.map(container, {
+      center: [20, 0],
+      zoom: 2,
+      minZoom: 2,
+      maxZoom: 12,
+      worldCopyJump: true,
+      scrollWheelZoom: true
+    });
+
+    // Standard OpenStreetMap geographical tiles.
+    L.tileLayer(
+      "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+      {
+        attribution:
+          '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+        maxZoom: 19
+      }
+    ).addTo(eventMap);
+
+    eventMapLayer = L.layerGroup().addTo(eventMap);
+
+    const validCoordinates = [];
+
+    records.forEach(record => {
+      const latitude = Number(record.latitude);
+      const longitude = Number(record.longitude);
+
+      if (
+        !Number.isFinite(latitude) ||
+        !Number.isFinite(longitude)
+      ) {
+        return;
+      }
+
+      validCoordinates.push([latitude, longitude]);
+
+      const earthquake = record.type === "earthquake";
+      const magnitude = record.magnitude ?? 0;
+
+      const color = earthquake
+        ? magnitude >= 5 ? "#e74c3c" : "#f39c35"
+        : "#168fe5";
+
+      const radius = earthquake
+        ? Math.min(13, 4 + Math.max(0, magnitude))
+        : 5;
+
+      L.circle([latitude, longitude], {
+        radius: earthquake
+          ? 80000 + Math.max(0, magnitude) * 20000
+          : 60000,
+        color,
+        weight: 1,
+        opacity: 0.3,
+        fillColor: color,
+        fillOpacity: 0.08,
+        interactive: false
+      }).addTo(eventMapLayer);
+
+      const marker = L.circleMarker(
+        [latitude, longitude],
+        {
+          radius,
+          color,
+          weight: 2,
+          opacity: 1,
+          fillColor: color,
+          fillOpacity: 0.9
+        }
+      ).addTo(eventMapLayer);
+
+      const popupContent = `
+        <div class="terron-map-popup">
+          <strong>${escapeHTML(record.title)}</strong>
+          <p>${escapeHTML(record.source)}</p>
+          <p>${escapeHTML(record.category)}</p>
+          ${earthquake && record.magnitude !== null
+            ? `<p>Magnitude: ${record.magnitude.toFixed(1)}</p>`
+            : ""}
+          <p>${latitude.toFixed(4)}°, ${longitude.toFixed(4)}°</p>
+        </div>
+      `;
+
+      marker.bindPopup(popupContent);
+
+      marker.on("click", () => {
+        showEventDetails(record);
+      });
+    });
+
+    if (validCoordinates.length === 1) {
+      eventMap.setView(validCoordinates[0], 5);
+    } else if (validCoordinates.length > 1) {
+      eventMap.fitBounds(validCoordinates, {
+        padding: [30, 30],
+        maxZoom: 4
+      });
+    }
+
+    requestAnimationFrame(() => {
+      if (eventMap) {
+        eventMap.invalidateSize();
+      }
+    });
+  }
+
+  // ==========================================
+  // PHASE 4E — EVENT TIMELINE
+  // ==========================================
+
+  function buildEventTimeline(records) {
+    if (!records.length) {
+      return `
+        <p class="data-error">
+          No events match the selected filters.
+        </p>
+      `;
+    }
+
+    return `
+      <div class="terron-event-timeline">
+        ${records.slice(0, 100).map(record => {
+          const earthquake = record.type === "earthquake";
+
+          const severity = earthquake
+            ? record.magnitude >= 5 ? "HIGH" :
+              record.magnitude >= 3 ? "MODERATE" : "LOW"
+            : "EVENT";
+
+          return `
+            <button
+              type="button"
+              class="terron-event-item"
+              data-event-id="${escapeHTML(record.id)}">
+
+              <span class="terron-event-marker ${earthquake ? "earthquake" : "nasa"}"></span>
+
+              <span class="terron-event-content">
+                <strong>${escapeHTML(record.title)}</strong>
+
+                <span class="terron-event-meta">
+                  ${escapeHTML(record.source)}
+                  · ${escapeHTML(record.category)}
+                  · ${escapeHTML(formatEventDate(
+                    record.timestamp ? record.timestamp * 1000 : null
+                  ))}
+                </span>
+              </span>
+
+              <span class="terron-event-severity ${severity.toLowerCase()}">
+                ${earthquake && record.magnitude !== null
+                  ? `M ${record.magnitude.toFixed(1)}`
+                  : severity}
+              </span>
+
+            </button>
+          `;
+        }).join("")}
+      </div>
+    `;
+  }
+
+  // ==========================================
+  // PHASE 4E — EVENT DETAILS
+  // ==========================================
+
+  function showEventDetails(record) {
+    const container = document.getElementById("terronEventDetails");
+
+    if (!container || !record) return;
+
+    container.innerHTML = `
+      <div class="terron-event-detail-card">
+
+        <div class="panel-kicker">
+          SELECTED EVENT · ${escapeHTML(record.source)}
+        </div>
+
+        <h3>${escapeHTML(record.title)}</h3>
+
+        <div class="terron-event-detail-grid">
+
+          <div>
+            <span>EVENT CATEGORY</span>
+            <strong>${escapeHTML(record.category)}</strong>
+          </div>
+
+          <div>
+            <span>DATE & TIME</span>
+            <strong>${escapeHTML(formatEventDate(
+              record.timestamp ? record.timestamp * 1000 : null
+            ))}</strong>
+          </div>
+
+          <div>
+            <span>LATITUDE</span>
+            <strong>${record.latitude.toFixed(4)}°</strong>
+          </div>
+
+          <div>
+            <span>LONGITUDE</span>
+            <strong>${record.longitude.toFixed(4)}°</strong>
+          </div>
+
+          ${record.magnitude !== null ? `
+            <div>
+              <span>MAGNITUDE</span>
+              <strong>${record.magnitude.toFixed(1)}</strong>
+            </div>
+          ` : ""}
+
+          ${record.depth !== null ? `
+            <div>
+              <span>DEPTH</span>
+              <strong>${record.depth.toFixed(1)} km</strong>
+            </div>
+          ` : ""}
+
+        </div>
+
+        <div class="terron-event-detail-actions">
+
+          <button
+            type="button"
+            class="terron-event-copy"
+            data-event-lat="${record.latitude}"
+            data-event-lng="${record.longitude}">
+            COPY COORDINATES
+          </button>
+
+          ${record.url ? `
+            <a
+              href="${escapeHTML(record.url)}"
+              target="_blank"
+              rel="noopener noreferrer">
+              OPEN SOURCE RECORD
+            </a>
+          ` : ""}
+
+        </div>
+      </div>
+    `;
+  }
+
+  // ==========================================
+  // PHASE 4E — EVENT FILTERS
+  // ==========================================
+
+  function filterGlobalEvents(records) {
+    const sourceFilter =
+      document.getElementById("terronEventSourceFilter")?.value || "all";
+
+    const timeFilter =
+      document.getElementById("terronEventTimeFilter")?.value || "all";
+
+    const magnitudeFilter =
+      document.getElementById("terronMagnitudeFilter")?.value || "all";
+
+    const categoryFilter =
+      document.getElementById("terronEventCategoryFilter")?.value || "all";
+
+    const now = Date.now();
+
+    const ranges = {
+      "24h": 24 * 60 * 60 * 1000,
+      "7d": 7 * 24 * 60 * 60 * 1000,
+      "30d": 30 * 24 * 60 * 60 * 1000
+    };
+
+    return records.filter(record => {
+      if (
+        sourceFilter === "earthquakes" &&
+        record.type !== "earthquake"
+      ) return false;
+
+      if (
+        sourceFilter === "nasa" &&
+        record.type !== "nasa"
+      ) return false;
+
+      if (timeFilter !== "all") {
+        if (!record.timestamp) return false;
+
+        const range = ranges[timeFilter];
+
+        if (!range || now - record.timestamp * 1000 > range) {
+          return false;
+        }
+      }
+
+      if (
+        record.type === "earthquake" &&
+        magnitudeFilter !== "all"
+      ) {
+        if (record.magnitude === null) return false;
+
+        if (
+          magnitudeFilter === "minor" &&
+          record.magnitude >= 3
+        ) return false;
+
+        if (
+          magnitudeFilter === "moderate" &&
+          (record.magnitude < 3 || record.magnitude >= 5)
+        ) return false;
+
+        if (
+          magnitudeFilter === "major" &&
+          record.magnitude < 5
+        ) return false;
+      }
+
+      if (
+        record.type === "nasa" &&
+        categoryFilter !== "all"
+      ) {
+        if (!record.category.toLowerCase().includes(categoryFilter)) {
+          return false;
+        }
+      }
+
+      return true;
+    });
+  }
+
+  function updateEventExplorer() {
+    const filtered = filterGlobalEvents(currentEventRecords);
+
+    const heatmap = document.getElementById("terronEventHeatmap");
+    const timeline = document.getElementById("terronEventTimeline");
+    const count = document.getElementById("terronEventCount");
+
+    if (heatmap) {
+      heatmap.innerHTML = buildEventHeatmap(filtered);
+      initializeEventMap(filtered);
+    }
+
+    if (timeline) {
+      timeline.innerHTML = buildEventTimeline(filtered);
+    }
+
+    if (count) {
+      count.textContent = `${filtered.length} MATCHING EVENTS`;
+    }
+  }
+
+  // ==========================================
+  // PHASE 4E — MAP AND TIMELINE STYLES
+  // ==========================================
+
+  function addEventExplorerStyles() {
+    if (document.getElementById("terronEventExplorerStyles")) return;
+
+    const style = document.createElement("style");
+    style.id = "terronEventExplorerStyles";
+
+    style.textContent = `
+
+      .terron-event-explorer {
+        margin:25px 0;
+        padding:18px;
+        border:1px solid rgba(0,195,255,.2);
+        border-radius:13px;
+        background:linear-gradient(145deg,rgba(8,24,40,.96),rgba(4,12,23,.98));
+      }
+
+      .terron-event-explorer h3 {
+        color:#e9f7ff;
+      }
+
+      .terron-event-filters {
+        display:grid;
+        grid-template-columns:repeat(4,minmax(0,1fr));
+        gap:12px;
+        margin:18px 0;
+      }
+
+      .terron-event-filters label {
+        display:flex;
+        flex-direction:column;
+        gap:7px;
+        color:#8ca6bb;
+        font-size:10px;
+        letter-spacing:.7px;
+      }
+
+      .terron-event-filters select {
+        min-width:0;
+        width:100%;
+        padding:11px;
+        color:#e9f7ff;
+        background:#071522;
+        border:1px solid rgba(0,195,255,.25);
+        border-radius:8px;
+        font:inherit;
+        font-size:12px;
+      }
+
+      .terron-event-summary {
+        display:flex;
+        justify-content:space-between;
+        align-items:center;
+        flex-wrap:wrap;
+        gap:10px;
+        margin:16px 0;
+      }
+
+      .terron-event-count {
+        color:#20c9f3;
+        font-size:11px;
+        font-weight:700;
+        letter-spacing:1px;
+      }
+
+      .terron-event-reset {
+        padding:9px 13px;
+        color:#20c9f3;
+        background:#0b2435;
+        border:1px solid rgba(32,201,243,.3);
+        border-radius:7px;
+        cursor:pointer;
+      }
+
+      .terron-heatmap-shell {
+        margin:18px 0 25px;
+        padding:15px;
+        border:1px solid rgba(32,201,243,.15);
+        border-radius:11px;
+        background:#050e19;
+      }
+
+      .terron-heatmap-heading {
+        display:flex;
+        justify-content:space-between;
+        align-items:center;
+        gap:12px;
+        flex-wrap:wrap;
+        margin-bottom:12px;
+      }
+
+      .terron-heatmap-heading h3 {
+        margin:0 0 5px;
+        font-size:15px;
+      }
+
+      .terron-heatmap-heading p {
+        margin:0;
+        color:#8ca6bb;
+        font-size:11px;
+      }
+
+      .terron-heatmap-count {
+        color:#20c9f3;
+        font-size:10px;
+        font-weight:700;
+      }
+
+      .terron-event-map {
+        display:block;
+        position:relative;
+        width:100%;
+        height:460px;
+        min-height:350px;
+        overflow:hidden;
+        border:1px solid rgba(32,201,243,.2);
+        border-radius:9px;
+        background:#e8edf0;
+        z-index:1;
+      }
+
+      .terron-event-map .leaflet-container {
+        width:100%;
+        height:100%;
+        background:#e8edf0;
+      }
+
+      .terron-event-map .leaflet-popup-content-wrapper,
+      .terron-event-map .leaflet-popup-tip {
+        color:#172b3a;
+        background:#ffffff;
+      }
+
+      .terron-event-map .leaflet-popup-content {
+        margin:12px 15px;
+      }
+
+      .terron-map-popup strong {
+        color:#087ca5;
+        font-size:13px;
+      }
+
+      .terron-map-popup p {
+        margin:6px 0;
+        color:#435565;
+        font-size:11px;
+      }
+
+      .terron-event-map .leaflet-control-zoom a {
+        color:#172b3a;
+        background:#ffffff;
+        border-color:#cbd5dc;
+      }
+
+      .terron-event-map .leaflet-control-attribution {
+        color:#435565;
+        background:rgba(255,255,255,.85);
+      }
+
+      .terron-event-map .leaflet-control-attribution a {
+        color:#087ca5;
+      }
+
+      .terron-heatmap-legend {
+        display:flex;
+        flex-wrap:wrap;
+        gap:20px;
+        margin-top:12px;
+        color:#a9bdce;
+        font-size:11px;
+      }
+
+      .heat-legend {
+        display:inline-block;
+        width:9px;
+        height:9px;
+        margin-right:6px;
+        border-radius:50%;
+      }
+
+      .heat-legend.earthquake {background:#e74c3c;}
+      .heat-legend.nasa {background:#168fe5;}
+
+      .terron-event-timeline {
+        display:grid;
+        gap:9px;
+        max-height:560px;
+        overflow-y:auto;
+        padding:3px;
+      }
+
+      .terron-event-item {
+        display:flex;
+        align-items:center;
+        gap:12px;
+        width:100%;
+        padding:13px;
+        text-align:left;
+        color:#e9f7ff;
+        background:rgba(12,31,47,.8);
+        border:1px solid rgba(90,145,175,.16);
+        border-radius:9px;
+        cursor:pointer;
+        transition:border-color .2s,background .2s;
+      }
+
+      .terron-event-item:hover,
+      .terron-event-item:focus-visible {
+        background:rgba(14,53,73,.8);
+        border-color:#20c9f3;
+        outline:none;
+      }
+
+      .terron-event-marker {
+        flex:0 0 9px;
+        width:9px;
+        height:9px;
+        border-radius:50%;
+      }
+
+      .terron-event-marker.earthquake {background:#e74c3c;}
+      .terron-event-marker.nasa {background:#168fe5;}
+
+      .terron-event-content {
+        display:grid;
+        gap:5px;
+        flex:1;
+        min-width:0;
+      }
+
+      .terron-event-content strong {
+        overflow-wrap:anywhere;
+        font-size:12px;
+      }
+
+      .terron-event-meta {
+        color:#8ca6bb;
+        font-size:10px;
+        line-height:1.5;
+      }
+
+      .terron-event-severity {
+        flex-shrink:0;
+        color:#9bb0c2;
+        font-size:10px;
+        font-weight:700;
+      }
+
+      .terron-event-severity.high {color:#ff765d;}
+      .terron-event-severity.moderate {color:#ffbd65;}
+      .terron-event-severity.low {color:#43d7a0;}
+
+      .terron-event-detail-card {
+        margin:18px 0;
+        padding:18px;
+        border:1px solid rgba(32,201,243,.3);
+        border-radius:11px;
+        background:rgba(7,20,33,.95);
+      }
+
+      .terron-event-detail-card h3 {
+        margin:10px 0 18px;
+        color:#e9f7ff;
+        font-size:17px;
+      }
+
+      .terron-event-detail-grid {
+        display:grid;
+        grid-template-columns:repeat(2,minmax(0,1fr));
+        gap:15px;
+      }
+
+      .terron-event-detail-grid div {
+        display:grid;
+        gap:5px;
+        min-width:0;
+      }
+
+      .terron-event-detail-grid span {
+        color:#8199af;
+        font-size:9px;
+        letter-spacing:.8px;
+      }
+
+      .terron-event-detail-grid strong {
+        color:#d9efff;
+        font-size:12px;
+        overflow-wrap:anywhere;
+      }
+
+      .terron-event-detail-actions {
+        display:flex;
+        flex-wrap:wrap;
+        gap:12px;
+        margin-top:18px;
+      }
+
+      .terron-event-detail-actions button,
+      .terron-event-detail-actions a {
+        display:inline-block;
+        padding:10px 13px;
+        color:#20c9f3;
+        background:#0b2435;
+        border:1px solid rgba(32,201,243,.4);
+        border-radius:7px;
+        font:inherit;
+        font-size:10px;
+        text-decoration:none;
+        cursor:pointer;
+      }
+
+      @media(max-width:850px) {
+        .terron-event-filters {
+          grid-template-columns:repeat(2,minmax(0,1fr));
+        }
+      }
+
+      @media(max-width:520px) {
+        .terron-event-explorer {padding:12px;}
+        .terron-event-filters {grid-template-columns:1fr;}
+        .terron-event-detail-grid {grid-template-columns:1fr;}
+        .terron-event-item {align-items:flex-start;}
+        .terron-event-severity {font-size:9px;}
+        .terron-event-map {height:350px;}
+      }
+    `;
+
+    document.head.appendChild(style);
+  }
+
+  // ==========================================
+  // PHASE 4E — EVENT INTERACTIONS
+  // ==========================================
+
+  function bindEventExplorer() {
+    const filterIds = [
+      "terronEventSourceFilter",
+      "terronEventTimeFilter",
+      "terronMagnitudeFilter",
+      "terronEventCategoryFilter"
+    ];
+
+    filterIds.forEach(id => {
+      document.getElementById(id)
+        ?.addEventListener("change", updateEventExplorer);
+    });
+
+    document.getElementById("terronEventResetFilters")
+      ?.addEventListener("click", () => {
+        filterIds.forEach(id => {
+          const select = document.getElementById(id);
+          if (select) select.value = "all";
+        });
+
+        updateEventExplorer();
+      });
+
+    document.getElementById("terronEventTimeline")
+      ?.addEventListener("click", event => {
+        const item = event.target.closest("[data-event-id]");
+
+        if (!item) return;
+
+        const record = currentEventRecords.find(
+          record => record.id === item.dataset.eventId
+        );
+
+        if (record) {
+          showEventDetails(record);
+
+          const marker = eventMapLayer && eventMap
+            ? null
+            : null;
+
+          if (eventMap) {
+            eventMap.setView(
+              [record.latitude, record.longitude],
+              Math.max(eventMap.getZoom(), 5)
+            );
+          }
+        }
+      });
+
+    document.getElementById("terronEventDetails")
+      ?.addEventListener("click", event => {
+        const button = event.target.closest(".terron-event-copy");
+
+        if (!button) return;
+
+        const coordinates =
+          `${button.dataset.eventLat}, ${button.dataset.eventLng}`;
+
+        if (navigator.clipboard?.writeText) {
+          navigator.clipboard.writeText(coordinates)
+            .then(() => {
+              button.textContent = "COPIED";
+            })
+            .catch(() => {
+              button.textContent = coordinates;
+            });
+        } else {
+          button.textContent = coordinates;
+        }
+      });
+  }
+
+  // ==========================================
+  // PHASE 4E — EVENT EXPLORER VIEW
+  // ==========================================
+
+  function eventExplorerView(data) {
+    currentEventRecords = collectGlobalEvents(data);
+
+    const earthquakeSource = data.global?.earthquakes;
+    const nasaSource = data.global?.events;
+
+    const earthquakeCount = currentEventRecords.filter(
+      item => item.type === "earthquake"
+    ).length;
+
+    const nasaCount = currentEventRecords.filter(
+      item => item.type === "nasa"
+    ).length;
+
+    return `
+      <section class="terron-event-explorer">
+
+        <div class="panel-kicker">
+          PHASE 4E · GLOBAL EVENT INTELLIGENCE
+        </div>
+
+        <h3 class="data-heading">
+          Global Event Timeline & Map
+        </h3>
+
+        <p class="data-footnote">
+          Explore earthquake and NASA natural-event records using
+          their reported timestamps and geographic coordinates.
+        </p>
+
+        <div class="metrics-grid">
+          ${card("EARTHQUAKE RECORDS", earthquakeSource?.ok ? earthquakeCount : "Unavailable", "USGS feed records with valid coordinates")}
+          ${card("NASA EVENT RECORDS", nasaSource?.ok ? nasaCount : "Unavailable", "NASA EONET point records")}
+          ${card("TOTAL PLOTTED EVENTS", currentEventRecords.length, "Valid geographic records")}
+        </div>
+
+        ${sourceStatus(earthquakeSource, "USGS")}
+        ${sourceStatus(nasaSource, "NASA EONET")}
+
+        <div class="terron-event-filters">
+
+          <label>
+            DATA SOURCE
+            <select id="terronEventSourceFilter">
+              <option value="all">All sources</option>
+              <option value="earthquakes">Earthquakes only</option>
+              <option value="nasa">NASA events only</option>
+            </select>
+          </label>
+
+          <label>
+            TIME RANGE
+            <select id="terronEventTimeFilter">
+              <option value="all">All available records</option>
+              <option value="24h">Last 24 hours</option>
+              <option value="7d">Last 7 days</option>
+              <option value="30d">Last 30 days</option>
+            </select>
+          </label>
+
+          <label>
+            EARTHQUAKE MAGNITUDE
+            <select id="terronMagnitudeFilter">
+              <option value="all">All magnitudes</option>
+              <option value="minor">Below 3.0</option>
+              <option value="moderate">3.0 to 4.9</option>
+              <option value="major">5.0 and above</option>
+            </select>
+          </label>
+
+          <label>
+            NASA EVENT CATEGORY
+            <select id="terronEventCategoryFilter">
+              <option value="all">All categories</option>
+              <option value="wildfire">Wildfire</option>
+              <option value="volcano">Volcano</option>
+              <option value="flood">Flood</option>
+              <option value="storm">Storm</option>
+              <option value="sea and lake ice">Sea and lake ice</option>
+              <option value="landslide">Landslide</option>
+            </select>
+          </label>
+
+        </div>
+
+        <div class="terron-event-summary">
+
+          <span id="terronEventCount" class="terron-event-count">
+            ${currentEventRecords.length} MATCHING EVENTS
+          </span>
+
+          <button
+            type="button"
+            id="terronEventResetFilters"
+            class="terron-event-reset">
+            RESET FILTERS
+          </button>
+
+        </div>
+
+        <div id="terronEventHeatmap">
+          ${buildEventHeatmap(currentEventRecords)}
+        </div>
+
+        <h3 class="data-heading">
+          Global Event Timeline
+        </h3>
+
+        <p class="data-footnote">
+          Select any event to inspect its reported details and coordinates.
+        </p>
+
+        <div id="terronEventTimeline">
+          ${buildEventTimeline(currentEventRecords)}
+        </div>
+
+        <div id="terronEventDetails" aria-live="polite">
+          <p class="data-footnote">
+            Select an event from the timeline or map to see its details.
+          </p>
+        </div>
+
+      </section>
+    `;
+  }
+
+  // ==========================================
+  // DISASTER INTELLIGENCE
+  // ==========================================
+
+  function disasterView(data) {
+    const source = data.global?.earthquakes;
+    const eventsSource = data.global?.events;
+
+    const features = source?.data?.features || [];
+    const events = eventsSource?.data?.events || [];
+
+    return `
+      ${sourceStatus(source, "USGS earthquake feed")}
+      ${sourceStatus(eventsSource, "NASA natural events")}
+
+      <div class="metrics-grid">
+        ${card("EARTHQUAKES", source?.ok ? features.length : "Unavailable", "USGS past-day feed")}
+        ${card("NATURAL EVENTS", eventsSource?.ok ? events.length : "Unavailable", "NASA open events")}
+        ${card("STRONGEST EVENT", source?.ok ? strongest(features) : "Unavailable", "Magnitude in past-day feed")}
+        ${card("OPEN NASA EVENTS", eventsSource?.ok ? events.length : "Unavailable", "NASA EONET")}
+      </div>
+
+      ${eventExplorerView(data)}
+
+      <h3 class="data-heading">Recent earthquake events</h3>
+      ${earthquakeTable(features)}
+
+      <h3 class="data-heading">NASA natural events</h3>
+      ${eventTable(events)}
+    `;
+  }
+
+  function strongest(features) {
+    const mags = features
+      .map(f => Number(f.properties?.mag))
+      .filter(Number.isFinite);
+
+    return mags.length ? Math.max(...mags).toFixed(1) : "No magnitude";
+  }
+
+  function earthquakeTable(features) {
+    if (!features.length) {
+      return `<p class="data-error">No earthquake records returned by this feed, or the feed is unavailable.</p>`;
+    }
+
+    return `
+      <div class="table-scroll">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Magnitude</th>
+              <th>Location</th>
+              <th>Time</th>
+              <th>Details</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${features.slice(0, 30).map(f => `
+              <tr>
+                <td>${escapeHTML(f.properties?.mag ?? "N/A")}</td>
+                <td>${escapeHTML(f.properties?.place || "Unknown")}</td>
+                <td>${f.properties?.time ? formatEventDate(f.properties.time) : "Unavailable"}</td>
+                <td>
+                  <a href="${escapeHTML(f.properties?.url || "#")}"
+                     target="_blank" rel="noopener noreferrer">USGS</a>
+                </td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  function eventTable(events) {
+    if (!events.length) {
+      return `<p class="data-error">No open NASA natural events were returned.</p>`;
+    }
+
+    return `
+      <div class="table-scroll">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Event</th>
+              <th>Category</th>
+              <th>Last update</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${events.slice(0, 30).map(e => `
+              <tr>
+                <td>${escapeHTML(e.title)}</td>
+                <td>${escapeHTML(e.categories?.map(c => c.title).join(", ") || "Unclassified")}</td>
+                <td>${escapeHTML(e.geometry?.at(-1)?.date || "Unavailable")}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  // ==========================================
+  // OCEAN INTELLIGENCE
+  // ==========================================
+
+  function marineView(data) {
+    const source = data.location?.marine;
+    const c = source?.data?.current;
+
+    if (!source?.ok) return sourceStatus(source, "Marine");
+
+    return `
+      ${sourceStatus(source, "Marine")}
+
+      <div class="metrics-grid">
+        ${card("WAVE HEIGHT", value(c, "wave_height", "m"))}
+        ${card("WAVE DIRECTION", value(c, "wave_direction", "°"))}
+        ${card("WAVE PERIOD", value(c, "wave_period", "s"))}
+        ${card("SEA TEMPERATURE", value(c, "sea_surface_temperature", "°C"))}
+      </div>
+
+      <p class="data-footnote">
+        Source: Open-Meteo Marine model. Values may be unavailable at some coordinates. This forecast is not suitable for marine navigation.
+      </p>
+    `;
+  }
+
+  // ==========================================
+  // AGRICULTURE INTELLIGENCE
+  // ==========================================
+
+  function agricultureView(data) {
+    const source = data.location?.weather;
+    const hourly = source?.data?.hourly;
+
+    if (!source?.ok) return sourceStatus(source, "Soil and agriculture");
+
+    return `
+      ${sourceStatus(source, "Soil and agriculture")}
+
+      <div class="metrics-grid">
+        ${card("SOIL TEMPERATURE", value({v: hourly?.soil_temperature_0cm?.[0]}, "v", "°C"), "Modelled surface soil")}
+        ${card("SOIL MOISTURE", value({v: hourly?.soil_moisture_0_to_1cm?.[0]}, "v", "m³/m³"), "Modelled topsoil layer")}
+        ${card("NEXT HOURLY UV", value({v: hourly?.uv_index?.[0]}, "v"), "Forecast value")}
+        ${card("VISIBILITY", value({v: hourly?.visibility?.[0]}, "v", "m"), "Hourly forecast value")}
+      </div>
+
+      <p class="data-footnote">
+        Soil variables are weather-model estimates, not readings from agricultural sensors or a specific farm.
+      </p>
+    `;
+  }
+
+  // ==========================================
+  // ATMOSPHERE INTELLIGENCE
+  // ==========================================
+
+  function atmosphereView(data) {
+    const source = data.location?.weather;
+    const c = source?.data?.current;
+
+    if (!source?.ok) return sourceStatus(source, "Atmosphere");
+
+    return `
+      ${sourceStatus(source, "Atmosphere")}
+
+      <div class="metrics-grid">
+        ${card("TEMPERATURE", value(c, "temperature_2m", "°C"))}
+        ${card("HUMIDITY", value(c, "relative_humidity_2m", "%"))}
+        ${card("WIND", value(c, "wind_speed_10m", "km/h"))}
+        ${card("WIND DIRECTION", value(c, "wind_direction_10m", "°"))}
+        ${card("CLOUD COVER", value(c, "cloud_cover", "%"))}
+        ${card("SURFACE PRESSURE", value(c, "surface_pressure", "hPa"))}
+      </div>
+
+      <p class="data-footnote">
+        Atmospheric fields are model-based values for the selected coordinates.
+      </p>
+    `;
+  }
+
+  // ==========================================
+  // FOREST AND NATURE
+  // ==========================================
+
+  function forestView(data) {
+    const source = data.global?.events;
+    const events = source?.data?.events || [];
+
+    const nature = events.filter(e =>
+      (e.categories || []).some(c =>
+        /wildfire|volcano|sea and lake ice|landslide/i.test(c.title || "")
+      )
+    );
+
+    return `
+      ${sourceStatus(source, "NASA nature events")}
+
+      <div class="metrics-grid">
+        ${card("MATCHING NATURE EVENTS", source?.ok ? nature.length : "Unavailable", "Filtered from NASA open events")}
+        ${card("NASA OPEN EVENTS", source?.ok ? events.length : "Unavailable", "All categories")}
+      </div>
+
+      <h3 class="data-heading">Nature and wildfire event feed</h3>
+      ${eventTable(nature)}
+
+      <p class="data-footnote">
+        This module displays curated event information. It does not measure live forest cover or calculate deforestation.
+      </p>
+    `;
+  }
+
+  // ==========================================
+  // ADVANCED ANALYTICS
+  // ==========================================
+
+  function formatDate(date) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+
+    return `${year}-${month}-${day}`;
+  }
+
+  function analyticsView(data) {
+    const weather = data.location?.weather?.data?.current;
+    const air = data.location?.air?.data?.current;
+    const quakes = data.global?.earthquakes?.data?.features || [];
+    const events = data.global?.events?.data?.events || [];
+
+    const end = new Date();
+    end.setDate(end.getDate() - 7);
+
+    const start = new Date(end);
+    start.setDate(start.getDate() - 29);
+
+    const startDate = formatDate(start);
+    const endDate = formatDate(end);
+
+    return `
+      <div class="metrics-grid">
+        ${card("TEMPERATURE", value(weather, "temperature_2m", "°C"))}
+        ${card("PM2.5", value(air, "pm2_5", "µg/m³"))}
+        ${card("EARTHQUAKES", data.global?.earthquakes?.ok ? quakes.length : "Unavailable")}
+        ${card("NATURAL EVENTS", data.global?.events?.ok ? events.length : "Unavailable")}
+      </div>
+
+      <h3 class="data-heading">Historical Weather Explorer</h3>
+
+      <p class="data-footnote">
+        Retrieve historical weather estimates for the selected location.
+        Explore daily temperature, rainfall and maximum wind speed.
+      </p>
+
+      <div class="terron-history-controls">
+        <label for="historyStart">START DATE</label>
+        <input type="date" id="historyStart"
+          value="${startDate}" max="${endDate}">
+
+        <label for="historyEnd">END DATE</label>
+        <input type="date" id="historyEnd"
+          value="${endDate}" max="${endDate}">
+
+        <button type="button" id="loadHistoricalBtn">
+          LOAD HISTORICAL DATA
+        </button>
+      </div>
+
+      <div id="historicalResults" aria-live="polite">
+        <p class="data-footnote">
+          Select your dates and load historical weather data.
+        </p>
+      </div>
+
+      <section class="terron-correlation-section" id="correlationSection">
+
+        <div class="terron-correlation-heading">
+          <div>
+            <div class="panel-kicker">PHASE 4D · ENVIRONMENTAL ANALYSIS</div>
+            <h3 class="data-heading">Environmental Correlation Engine</h3>
+            <p class="data-footnote">
+              Explore statistical relationships between environmental variables
+              using matching hourly forecast data.
+            </p>
+          </div>
+
+          <span class="live-tag">
+            <span class="status-dot"></span>
+            ANALYTICS
+          </span>
+        </div>
+
+        <div class="terron-correlation-grid">
+
+          <article class="terron-correlation-card">
+            <div class="correlation-number">01</div>
+            <h4>Temperature vs Humidity</h4>
+            <p>Explore how temperature and relative humidity vary together.</p>
+          </article>
+
+          <article class="terron-correlation-card">
+            <div class="correlation-number">02</div>
+            <h4>Rainfall vs Soil Moisture</h4>
+            <p>Explore the relationship between rainfall and modelled topsoil moisture.</p>
+          </article>
+
+          <article class="terron-correlation-card">
+            <div class="correlation-number">03</div>
+            <h4>Temperature vs AQI</h4>
+            <p>Compare temperature and forecast air-quality index values.</p>
+          </article>
+
+          <article class="terron-correlation-card">
+            <div class="correlation-number">04</div>
+            <h4>Wind vs Rainfall</h4>
+            <p>Explore how wind speed and precipitation vary together.</p>
+          </article>
+
+        </div>
+
+        <div class="terron-correlation-actions">
+          <button type="button" id="runCorrelationBtn">
+            RUN CORRELATION ANALYSIS
+          </button>
+
+          <button type="button" id="refreshCorrelationBtn">
+            REFRESH ANALYSIS
+          </button>
+        </div>
+
+        <div id="correlationStatus" aria-live="polite"
+          class="terron-correlation-status">
+          <p class="data-footnote">
+            Select Run Correlation Analysis to examine the selected location.
+          </p>
+        </div>
+
+        <div id="correlationResults"
+          class="terron-correlation-results"
+          aria-live="polite"></div>
+
+        <p class="data-footnote">
+          Correlation coefficients describe statistical association, not causation.
+          Results depend on matching hourly values from the available APIs.
+        </p>
+
+      </section>
+
+      <h3 class="data-heading">Intelligence Reports</h3>
+
+      <p class="data-footnote">
+        Generate a report using the currently retrieved TERRON data.
+        Export readings as CSV or open a printable intelligence report.
+      </p>
+
+      <div class="terron-report-actions">
+        <button type="button" id="generateReportBtn">
+          GENERATE INTELLIGENCE REPORT
+        </button>
+
+        <button type="button" id="exportCSVBtn">
+          EXPORT DATA AS CSV
+        </button>
+      </div>
+
+      <h3 class="data-heading">Data availability summary</h3>
+
+      ${missionView(data)}
+
+      <p class="data-footnote">
+        Historical values are reanalysis/model estimates, not direct
+        weather-station measurements. No synthetic dataset is used.
+      </p>
+    `;
+  }
+
+  // ==========================================
+  // GLOBAL LOCATION COMPARISON
+  // ==========================================
+
+  function comparisonView() {
+    return `
+      <h3 class="data-heading">Global Location Comparison</h3>
+
+      <p class="data-footnote">
+        Compare weather, air quality and marine conditions across
+        multiple global locations using public Open-Meteo data.
+      </p>
+
+      <div class="terron-comparison-controls">
+
+        <div class="terron-comparison-location">
+          <label for="compareLocation1">LOCATION 01</label>
+          <input type="text" id="compareLocation1" value="Madurai"
+            placeholder="Enter a city or place">
+        </div>
+
+        <div class="terron-comparison-location">
+          <label for="compareLocation2">LOCATION 02</label>
+          <input type="text" id="compareLocation2" value="Chennai"
+            placeholder="Enter a city or place">
+        </div>
+
+        <div class="terron-comparison-location">
+          <label for="compareLocation3">LOCATION 03</label>
+          <input type="text" id="compareLocation3"
+            placeholder="Optional third location">
+        </div>
+
+        <div class="terron-comparison-location">
+          <label for="compareLocation4">LOCATION 04</label>
+          <input type="text" id="compareLocation4"
+            placeholder="Optional fourth location">
+        </div>
+
+      </div>
+
+      <div class="terron-comparison-actions">
+        <button type="button" id="runComparisonBtn">
+          COMPARE LOCATIONS
+        </button>
+
+        <button type="button" id="clearComparisonBtn">
+          CLEAR
+        </button>
+
+        <button type="button" id="exportComparisonBtn" disabled>
+          EXPORT COMPARISON CSV
+        </button>
+      </div>
+
+      <div id="comparisonStatus" aria-live="polite">
+        <p class="data-footnote">
+          Enter at least two locations and start your comparison.
+        </p>
+      </div>
+
+      <div id="comparisonResults"></div>
+
+      <p class="data-footnote">
+        Weather and air-quality values are model-based estimates.
+        Marine values may be unavailable for inland locations.
+      </p>
+    `;
+  }
+
+  // ==========================================
+  // MISSION CONTROL
+  // ==========================================
+
+  function missionView(data) {
+    const sources = [
+      ["Weather", data.location?.weather],
+      ["Air quality", data.location?.air],
+      ["Marine", data.location?.marine],
+      ["USGS earthquakes", data.global?.earthquakes],
+      ["NASA EONET", data.global?.events]
+    ];
+
+    return `
+      <div class="table-scroll">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Source</th>
+              <th>Status</th>
+              <th>Last update</th>
+              <th>Details</th>
+            </tr>
+          </thead>
+
+          <tbody>
+            ${sources.map(([name, s]) => `
+              <tr>
+                <td>${escapeHTML(name)}</td>
+                <td>${s?.ok ? "CONNECTED" : "UNAVAILABLE"}</td>
+                <td>${s?.updatedAt ? escapeHTML(new Date(s.updatedAt).toLocaleString()) : "No successful update"}</td>
+                <td>${escapeHTML(s?.error || "Response received")}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  // ==========================================
+  // MAIN RENDER ENGINE
+  // ==========================================
+
+  function render(data, page, locationName) {
+
+    const title = pageNames[page] || "Earth Observation";
+
+    // Remove old Leaflet map before replacing workspace HTML.
+    if (eventMap) {
+      eventMap.remove();
+      eventMap = null;
+      eventMapLayer = null;
+    }
+
+    let content = "";
+
+    switch (page) {
+
+      case "weather":
+        content = weatherView(data);
+        break;
+
+      case "environment":
+        content = environmentView(data);
+        break;
+
+      case "disasters":
+        content = disasterView(data);
+        break;
+
+      case "ocean":
+        content = marineView(data);
+        break;
+
+      case "agriculture":
+        content = agricultureView(data);
+        break;
+
+      case "atmosphere":
+        content = atmosphereView(data);
+        break;
+
+      case "forest":
+        content = forestView(data);
+        break;
+
+      case "analytics":
+        content = analyticsView(data);
+        break;
+
+      case "comparison":
+        content = comparisonView();
+        break;
+
+      case "mission":
+        content = missionView(data);
+        break;
+
+      case "earth":
+        content = `
+          <p class="data-success">
+            Interactive Earth map is available above.
+            Select a location to retrieve its data.
+          </p>
+        `;
+        break;
+
+      default:
+        content = `
+          <p>Select an intelligence module from the navigation.</p>
+        `;
+    }
+
+    root.innerHTML = `
+      <div class="panel data-module-panel">
+
+        <div class="panel-header">
+          <div>
+            <div class="panel-kicker">LIVE DATA WORKSPACE</div>
+            <h2>${escapeHTML(title)}</h2>
+            <p class="data-location">
+              Selected location: ${escapeHTML(locationName || "Not selected")}
+            </p>
+          </div>
+
+          <span class="live-tag">
+            <span class="status-dot"></span>
+            DATA VIEW
+          </span>
+        </div>
+
+        ${content}
+
+      </div>
+    `;
+
+    root.hidden = false;
+
+    if (page === "disasters") {
+      addEventExplorerStyles();
+      bindEventExplorer();
+
+      initializeEventMap(
+        filterGlobalEvents(currentEventRecords)
+      );
+    }
+  }
+
+  // ==========================================
+  // MOUNT WORKSPACE
+  // ==========================================
+
+  function mount() {
+    const pageContent = document.querySelector(".page-content");
+
+    if (!pageContent) return;
+
+    const footer = pageContent.querySelector(".footer");
+
+    if (footer) {
+      pageContent.insertBefore(root, footer);
+    } else {
+      pageContent.appendChild(root);
+    }
+  }
+
+  return {
+    mount,
+    render
+  };
+
+})();

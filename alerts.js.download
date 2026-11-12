@@ -1,0 +1,550 @@
+"use strict";
+
+window.TERRON_ALERTS = (() => {
+
+  const STORAGE_KEY = "terron_alert_thresholds_v1";
+
+  const defaults = {
+    earthquake: 4.5,
+    aqi: 100,
+    pm25: 35,
+    rainfall: 50,
+    wind: 50
+  };
+
+  let thresholds = loadThresholds();
+
+  function loadThresholds() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
+
+      return {
+        ...defaults,
+        ...(saved && typeof saved === "object" ? saved : {})
+      };
+    } catch {
+      return { ...defaults };
+    }
+  }
+
+  function saveThresholds() {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(thresholds));
+  }
+
+  function escapeHTML(value) {
+    return String(value ?? "").replace(/[&<>"']/g, char => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;"
+    })[char]);
+  }
+
+  function number(value) {
+    if (value === null || value === undefined || value === "") {
+      return null;
+    }
+
+    const result = Number(value);
+    return Number.isFinite(result) ? result : null;
+  }
+
+  function formatTime(value) {
+    if (!value) return "Time unavailable";
+
+    const date = new Date(value);
+
+    if (Number.isNaN(date.getTime())) {
+      return "Time unavailable";
+    }
+
+    return date.toLocaleString("en-IN");
+  }
+
+  function severity(value, threshold, highMultiplier = 1.5) {
+    if (value >= threshold * highMultiplier) return "high";
+    return "moderate";
+  }
+
+  function evaluate(data) {
+    const alerts = new Map();
+
+    function add(alert) {
+      alerts.set(alert.id, alert);
+    }
+
+    // EARTHQUAKE ALERTS
+
+    const earthquakeFeed = data.global?.earthquakes;
+
+    if (earthquakeFeed?.ok) {
+      const features = earthquakeFeed.data?.features || [];
+
+      features.forEach(feature => {
+        const properties = feature.properties || {};
+        const magnitude = number(properties.mag);
+
+        if (magnitude === null || magnitude < thresholds.earthquake) {
+          return;
+        }
+
+        const id = feature.id || `${properties.time}-${magnitude}`;
+
+        add({
+          id: `earthquake:${id}`,
+          type: "EARTHQUAKE",
+          severity: severity(magnitude, thresholds.earthquake, 1.3),
+          title: `Magnitude ${magnitude.toFixed(1)} earthquake`,
+          message: properties.place || "Location unavailable",
+          value: `${magnitude.toFixed(1)} magnitude`,
+          source: "USGS Earthquake Feed",
+          time: properties.time
+        });
+      });
+    }
+
+    // AIR QUALITY ALERTS
+
+    const airSource = data.location?.air;
+
+    if (airSource?.ok) {
+      const current = airSource.data?.current || {};
+
+      const aqi = number(current.us_aqi);
+
+      if (aqi !== null && aqi >= thresholds.aqi) {
+        add({
+          id: "environment:aqi",
+          type: "AIR QUALITY",
+          severity: severity(aqi, thresholds.aqi, 1.5),
+          title: "Elevated US AQI",
+          message: "The returned air-quality model value exceeds your configured threshold.",
+          value: `${aqi.toFixed(1)} US AQI`,
+          source: "Open-Meteo Air Quality API",
+          time: current.time
+        });
+      }
+
+      const pm25 = number(current.pm2_5);
+
+      if (pm25 !== null && pm25 >= thresholds.pm25) {
+        add({
+          id: "environment:pm25",
+          type: "AIR QUALITY",
+          severity: severity(pm25, thresholds.pm25, 2),
+          title: "Elevated PM2.5",
+          message: "The returned fine-particle estimate exceeds your configured threshold.",
+          value: `${pm25.toFixed(1)} µg/m³`,
+          source: "Open-Meteo Air Quality API",
+          time: current.time
+        });
+      }
+    }
+
+    // WEATHER FORECAST ALERTS
+
+    const weatherSource = data.location?.weather;
+
+    if (weatherSource?.ok) {
+      const hourly = weatherSource.data?.hourly || {};
+
+      const rainfallValues = (hourly.precipitation || [])
+        .slice(0, 24)
+        .map(number)
+        .filter(value => value !== null);
+
+      const windValues = (hourly.wind_speed_10m || [])
+        .slice(0, 24)
+        .map(number)
+        .filter(value => value !== null);
+
+      if (rainfallValues.length) {
+        const rainfall = rainfallValues.reduce((sum, value) => sum + value, 0);
+
+        if (rainfall >= thresholds.rainfall) {
+          add({
+            id: "weather:rainfall",
+            type: "WEATHER FORECAST",
+            severity: severity(rainfall, thresholds.rainfall, 2),
+            title: "Heavy rainfall forecast indicator",
+            message: "The next 24 hours of forecast precipitation exceed your configured threshold.",
+            value: `${rainfall.toFixed(1)} mm / 24h`,
+            source: "Open-Meteo Weather API",
+            time: hourly.time?.[0]
+          });
+        }
+      }
+
+      if (windValues.length) {
+        const maximumWind = Math.max(...windValues);
+
+        if (maximumWind >= thresholds.wind) {
+          add({
+            id: "weather:wind",
+            type: "WEATHER FORECAST",
+            severity: severity(maximumWind, thresholds.wind, 1.5),
+            title: "Strong wind forecast indicator",
+            message: "The maximum forecast wind speed in the next 24 hours exceeds your configured threshold.",
+            value: `${maximumWind.toFixed(1)} km/h`,
+            source: "Open-Meteo Weather API",
+            time: hourly.time?.[0]
+          });
+        }
+      }
+    }
+
+    return [...alerts.values()].sort((a, b) => {
+      const rank = { high: 0, moderate: 1 };
+      return rank[a.severity] - rank[b.severity];
+    });
+  }
+
+  function addStyles() {
+    if (document.getElementById("terronAlertStyles")) return;
+
+    const style = document.createElement("style");
+    style.id = "terronAlertStyles";
+
+    style.textContent = `
+      .terron-alert-center {
+        margin: 22px 0;
+        padding: 20px;
+        border: 1px solid rgba(0,195,255,.22);
+        border-radius: 13px;
+        background: linear-gradient(145deg,#0a1b2b,#050d19);
+      }
+
+      .terron-alert-header {
+        display:flex;
+        justify-content:space-between;
+        align-items:center;
+        flex-wrap:wrap;
+        gap:12px;
+      }
+
+      .terron-alert-header h2 {
+        margin:0;
+        color:#e8f6ff;
+        font-size:19px;
+      }
+
+      .terron-alert-count {
+        color:#20c9f3;
+        font-size:12px;
+        font-weight:700;
+      }
+
+      .terron-alert-notice {
+        margin:12px 0 20px;
+        color:#8ca6bb;
+        font-size:11px;
+        line-height:1.6;
+      }
+
+      .terron-alert-list {
+        display:grid;
+        gap:12px;
+      }
+
+      .terron-alert-card {
+        padding:15px;
+        border:1px solid rgba(120,160,190,.2);
+        border-left:3px solid #20c9f3;
+        border-radius:9px;
+        background:rgba(9,24,38,.85);
+      }
+
+      .terron-alert-card.high {
+        border-left-color:#ff775e;
+      }
+
+      .terron-alert-card.moderate {
+        border-left-color:#ffb45e;
+      }
+
+      .terron-alert-card h3 {
+        margin:8px 0;
+        color:#eaf8ff;
+        font-size:14px;
+      }
+
+      .terron-alert-card p {
+        margin:5px 0;
+        color:#a8bfd1;
+        font-size:12px;
+        line-height:1.5;
+      }
+
+      .terron-alert-meta {
+        display:flex;
+        flex-wrap:wrap;
+        gap:9px;
+        align-items:center;
+        color:#829caf;
+        font-size:10px;
+      }
+
+      .terron-alert-severity {
+        font-weight:800;
+        letter-spacing:.8px;
+      }
+
+      .terron-alert-card.high .terron-alert-severity {
+        color:#ff775e;
+      }
+
+      .terron-alert-card.moderate .terron-alert-severity {
+        color:#ffb45e;
+      }
+
+      .terron-alert-empty {
+        padding:22px;
+        text-align:center;
+        color:#8ca6bb;
+        border:1px dashed rgba(0,195,255,.2);
+        border-radius:9px;
+        font-size:12px;
+      }
+
+      .terron-threshold-grid {
+        display:grid;
+        grid-template-columns:repeat(5,minmax(0,1fr));
+        gap:12px;
+        margin:18px 0;
+      }
+
+      .terron-threshold-grid label {
+        display:flex;
+        flex-direction:column;
+        gap:7px;
+        color:#8ca6bb;
+        font-size:10px;
+      }
+
+      .terron-threshold-grid input {
+        width:100%;
+        min-width:0;
+        padding:10px;
+        color:#eaf8ff;
+        background:#071522;
+        border:1px solid rgba(0,195,255,.25);
+        border-radius:7px;
+        font:inherit;
+      }
+
+      .terron-alert-actions {
+        display:flex;
+        flex-wrap:wrap;
+        gap:10px;
+        margin:15px 0;
+      }
+
+      .terron-alert-actions button {
+        padding:10px 15px;
+        color:white;
+        background:linear-gradient(135deg,#063b55,#087b9e);
+        border:1px solid #16c9f5;
+        border-radius:8px;
+        font:inherit;
+        font-size:11px;
+        font-weight:700;
+        cursor:pointer;
+      }
+
+      .terron-alert-actions button:disabled {
+        opacity:.5;
+        cursor:not-allowed;
+      }
+
+      .terron-alert-source-status {
+        margin-top:15px;
+        color:#829caf;
+        font-size:11px;
+        line-height:1.8;
+      }
+
+      @media(max-width:900px) {
+        .terron-threshold-grid {
+          grid-template-columns:repeat(2,minmax(0,1fr));
+        }
+      }
+
+      @media(max-width:480px) {
+        .terron-threshold-grid {
+          grid-template-columns:1fr;
+        }
+
+        .terron-alert-center {
+          padding:13px;
+        }
+      }
+    `;
+
+    document.head.appendChild(style);
+  }
+
+  function render(panel, data) {
+    const alerts = evaluate(data);
+
+    const sourceStatus = [
+      ["Earthquakes", data.global?.earthquakes],
+      ["Air quality", data.location?.air],
+      ["Weather forecast", data.location?.weather]
+    ];
+
+    panel.innerHTML = `
+      <div class="terron-alert-header">
+        <h2>Environmental Alert Center</h2>
+        <span class="terron-alert-count">
+          ${alerts.length} ACTIVE INDICATOR${alerts.length === 1 ? "" : "S"}
+        </span>
+      </div>
+
+      <p class="terron-alert-notice">
+        Informational indicators generated from retrieved public data.
+        These are not official emergency warnings or a replacement for
+        local authorities. Weather and air-quality readings may be model estimates.
+      </p>
+
+      <div class="terron-alert-actions">
+        <button type="button" id="terronSaveThresholds">
+          SAVE THRESHOLDS
+        </button>
+        <button type="button" id="terronResetThresholds">
+          RESTORE DEFAULTS
+        </button>
+        <button type="button" id="terronRefreshAlerts">
+          REFRESH DATA
+        </button>
+      </div>
+
+      <h3 class="data-heading">Alert Threshold Configuration</h3>
+
+      <div class="terron-threshold-grid">
+        ${thresholdInput("earthquake", "Earthquake magnitude", "4.5")}
+        ${thresholdInput("aqi", "US AQI", "100")}
+        ${thresholdInput("pm25", "PM2.5 (µg/m³)", "35")}
+        ${thresholdInput("rainfall", "Rainfall (mm / 24h)", "50")}
+        ${thresholdInput("wind", "Wind (km/h)", "50")}
+      </div>
+
+      <h3 class="data-heading">Current Indicators</h3>
+
+      <div class="terron-alert-list">
+        ${alerts.length ? alerts.map(alert => `
+          <article class="terron-alert-card ${alert.severity}">
+            <div class="terron-alert-meta">
+              <span class="terron-alert-severity">
+                ${alert.severity.toUpperCase()}
+              </span>
+              <span>${escapeHTML(alert.type)}</span>
+            </div>
+            <h3>${escapeHTML(alert.title)}</h3>
+            <p>${escapeHTML(alert.message)}</p>
+            <p><strong>${escapeHTML(alert.value)}</strong></p>
+            <div class="terron-alert-meta">
+              <span>${escapeHTML(alert.source)}</span>
+              <span>${escapeHTML(formatTime(alert.time))}</span>
+            </div>
+          </article>
+        `).join("") : `
+          <div class="terron-alert-empty">
+            No configured thresholds are currently exceeded by the available data.
+          </div>
+        `}
+      </div>
+
+      <div class="terron-alert-source-status">
+        <strong>Data source status</strong><br>
+        ${sourceStatus.map(([name, source]) => `
+          ${escapeHTML(name)}:
+          ${!source ? "NOT LOADED" : source.ok ? "CONNECTED" : "UNAVAILABLE"}
+          <br>
+        `).join("")}
+        <br>
+        Last evaluated: ${escapeHTML(new Date().toLocaleString("en-IN"))}
+      </div>
+    `;
+
+    panel.querySelector("#terronSaveThresholds")
+      ?.addEventListener("click", () => {
+        const keys = Object.keys(defaults);
+        const updated = {};
+
+        for (const key of keys) {
+          const input = panel.querySelector(`#threshold-${key}`);
+          const value = number(input?.value);
+
+          if (value === null || value < 0) {
+            window.alert("Enter valid non-negative threshold values.");
+            return;
+          }
+
+          updated[key] = value;
+        }
+
+        thresholds = updated;
+        saveThresholds();
+        render(panel, data);
+
+        window.dispatchEvent(new CustomEvent("terron:toast", {
+          detail: "Alert thresholds saved."
+        }));
+      });
+
+    panel.querySelector("#terronResetThresholds")
+      ?.addEventListener("click", () => {
+        thresholds = { ...defaults };
+        saveThresholds();
+        render(panel, data);
+      });
+
+    panel.querySelector("#terronRefreshAlerts")
+      ?.addEventListener("click", () => {
+        if (typeof window.TERRON_REFRESH === "function") {
+          window.TERRON_REFRESH();
+        }
+      });
+  }
+
+  function thresholdInput(key, label, fallback) {
+    return `
+      <label>
+        ${escapeHTML(label)}
+        <input
+          id="threshold-${key}"
+          type="number"
+          min="0"
+          step="any"
+          value="${escapeHTML(thresholds[key] ?? fallback)}"
+        >
+      </label>
+    `;
+  }
+
+  function mount(data) {
+    const workspace = document.getElementById("dataWorkspace");
+
+    if (!workspace) return;
+
+    let panel = document.getElementById("terronAlertCenter");
+
+    if (!panel) {
+      panel = document.createElement("section");
+      panel.id = "terronAlertCenter";
+      panel.className = "terron-alert-center";
+      workspace.appendChild(panel);
+    }
+
+    addStyles();
+    render(panel, data);
+  }
+
+  return {
+    mount,
+    evaluate,
+    getThresholds: () => ({ ...thresholds })
+  };
+
+})();

@@ -1,0 +1,32 @@
+"use strict";
+
+window.TERRON_CONFIG = {
+  appName: "TERRON",
+  version: "2.0.0",
+
+  defaultLocation: {
+    name: "Madurai",
+    lat: 9.9252,
+    lng: 78.1198,
+    zoom: 5
+  },
+
+  refreshInterval: 10 * 60 * 1000,
+
+  sources: {
+    weather: "Open-Meteo Weather API",
+    air: "Open-Meteo Air Quality API",
+    marine: "Open-Meteo Marine API",
+    earthquakes: "USGS Earthquake Feed",
+    events: "NASA EONET"
+  },
+
+  layouts: [
+    { id: "command", name: "Command Center Premium" },
+    { id: "minimal", name: "Modern Minimalist" },
+    { id: "analytics", name: "Advanced Analytics" },
+    { id: "immersive", name: "Immersive Earth Map" },
+    { id: "professional", name: "Professional Dashboard" },
+    { id: "futuristic", name: "Ultra Futuristic Interface" }
+  ]
+};

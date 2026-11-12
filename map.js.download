@@ -1,0 +1,226 @@
+"use strict";
+
+window.TERRON_MAP = (() => {
+  let map = null;
+  let selectedMarker = null;
+  let eventLayer = null;
+
+  function initialize() {
+    if (typeof L === "undefined") {
+      throw new Error("Leaflet is unavailable.");
+    }
+
+    if (map) {
+      map.invalidateSize();
+      return true;
+    }
+
+    map = L.map("earthMap", {
+      center: [
+        window.TERRON_CONFIG.defaultLocation.lat,
+        window.TERRON_CONFIG.defaultLocation.lng
+      ],
+      zoom: window.TERRON_CONFIG.defaultLocation.zoom,
+      minZoom: 2,
+      maxZoom: 18
+    });
+
+    // STANDARD OPENSTREETMAP
+    const standardMap = L.tileLayer(
+      "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+      {
+        maxZoom: 19,
+        attribution:
+          '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+      }
+    );
+
+    // OPENTOPOMAP TERRAIN
+    const terrainMap = L.tileLayer(
+      "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+      {
+        maxZoom: 17,
+        attribution:
+          'Map data: &copy; OpenStreetMap contributors | Map style: &copy; <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA)'
+      }
+    );
+
+    // Keep the original map as default
+    standardMap.addTo(map);
+
+    // Map style selector
+    L.control.layers(
+      {
+        "Standard Map": standardMap,
+        "Terrain Map": terrainMap
+      },
+      {},
+      {
+        position: "topright",
+        collapsed: true
+      }
+    ).addTo(map);
+
+    // Event markers
+    eventLayer = L.layerGroup().addTo(map);
+
+    // Map click selection
+    map.on("click", event => {
+      selectLocation(
+        event.latlng.lat,
+        event.latlng.lng,
+        "Selected map location"
+      );
+
+      document.dispatchEvent(new CustomEvent(
+        "terron:locationchange",
+        {
+          detail: {
+            lat: event.latlng.lat,
+            lng: event.latlng.lng,
+            name: "Selected map location"
+          }
+        }
+      ));
+    });
+
+    setTimeout(() => {
+      if (map) map.invalidateSize();
+    }, 300);
+
+    return true;
+  }
+
+  function escapeHTML(value) {
+    return String(value ?? "").replace(/[&<>"']/g, char => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;"
+    })[char]);
+  }
+
+  function selectLocation(lat, lng, label) {
+    if (!map) return;
+
+    if (selectedMarker) {
+      map.removeLayer(selectedMarker);
+    }
+
+    selectedMarker = L.marker([lat, lng]).addTo(map);
+
+    selectedMarker.bindPopup(
+      `<strong>${escapeHTML(label)}</strong><br>
+      Latitude: ${lat.toFixed(4)}<br>
+      Longitude: ${lng.toFixed(4)}`
+    ).openPopup();
+
+    return { lat, lng, label };
+  }
+
+  function searchLocation(lat, lng, label) {
+    if (!map) return;
+
+    map.setView([lat, lng], 9, { animate: true });
+    selectLocation(lat, lng, label);
+  }
+
+  function renderEvents(earthquakeData, nasaData) {
+    if (!eventLayer) return;
+
+    eventLayer.clearLayers();
+
+    const earthquakeFeatures = earthquakeData?.features || [];
+
+    earthquakeFeatures.forEach(feature => {
+      const coordinates = feature.geometry?.coordinates;
+      if (!coordinates || coordinates.length < 2) return;
+
+      const [lng, lat] = coordinates;
+      const properties = feature.properties || {};
+      const magnitude = Number(properties.mag);
+
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+      const marker = L.circleMarker([lat, lng], {
+        radius: Math.max(4, Math.min(12, 4 + (magnitude || 0))),
+        color: "#ffad61",
+        fillColor: "#ff754d",
+        fillOpacity: 0.75,
+        weight: 1
+      });
+
+      marker.bindPopup(
+        `<strong>Earthquake</strong><br>
+        ${escapeHTML(properties.place || "Location unavailable")}<br>
+        Magnitude: ${
+          Number.isFinite(magnitude)
+            ? magnitude.toFixed(1)
+            : "Not reported"
+        }<br>
+        <a href="${escapeHTML(properties.url || "#")}"
+        target="_blank" rel="noopener">USGS event details</a>`
+      );
+
+      marker.addTo(eventLayer);
+    });
+
+    const events = nasaData?.events || [];
+
+    events.forEach(event => {
+      const geometry = event.geometry || [];
+      const latest = geometry[geometry.length - 1];
+
+      if (!latest || latest.type !== "Point") return;
+
+      const coordinates = latest.coordinates || [];
+      const [lng, lat] = coordinates;
+
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+      const marker = L.circleMarker([lat, lng], {
+        radius: 6,
+        color: "#48e6a1",
+        fillColor: "#48e6a1",
+        fillOpacity: 0.8,
+        weight: 1
+      });
+
+      marker.bindPopup(
+        `<strong>${escapeHTML(event.title)}</strong><br>
+        ${escapeHTML(event.categories?.[0]?.title || "Natural event")}<br>
+        ${lat.toFixed(3)}, ${lng.toFixed(3)}`
+      );
+
+      marker.addTo(eventLayer);
+    });
+  }
+
+  function reset() {
+    if (!map) return;
+
+    map.setView([
+      window.TERRON_CONFIG.defaultLocation.lat,
+      window.TERRON_CONFIG.defaultLocation.lng
+    ], window.TERRON_CONFIG.defaultLocation.zoom);
+
+    if (selectedMarker) {
+      map.removeLayer(selectedMarker);
+      selectedMarker = null;
+    }
+  }
+
+  function getMap() {
+    return map;
+  }
+
+  return {
+    initialize,
+    selectLocation,
+    searchLocation,
+    renderEvents,
+    reset,
+    getMap
+  };
+})();

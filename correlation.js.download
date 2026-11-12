@@ -1,0 +1,603 @@
+"use strict";
+
+window.TERRON_CORRELATION = (() => {
+
+  // ==========================================
+  // CONFIGURATION
+  // ==========================================
+
+  const MIN_SAMPLES = 12;
+
+  // ==========================================
+  // HELPERS
+  // ==========================================
+
+  function escapeHTML(value) {
+    return String(value ?? "").replace(/[&<>"']/g, char => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;"
+    })[char]);
+  }
+
+  function isValidNumber(value) {
+    return (
+      value !== null &&
+      value !== undefined &&
+      value !== "" &&
+      Number.isFinite(Number(value))
+    );
+  }
+
+  function getRelationship(r) {
+    if (r >= 0.7) return "Strong Positive";
+    if (r >= 0.4) return "Moderate Positive";
+    if (r >= 0.2) return "Weak Positive";
+    if (r > -0.2) return "Negligible";
+    if (r > -0.4) return "Weak Negative";
+    if (r > -0.7) return "Moderate Negative";
+    return "Strong Negative";
+  }
+
+  // ==========================================
+  // TIME ALIGNMENT
+  // ==========================================
+
+  function createTimeMap(times, values) {
+    const map = new Map();
+
+    if (!Array.isArray(times) || !Array.isArray(values)) {
+      return map;
+    }
+
+    const length = Math.min(times.length, values.length);
+
+    for (let i = 0; i < length; i++) {
+      if (!times[i] || !isValidNumber(values[i])) {
+        continue;
+      }
+
+      map.set(times[i], Number(values[i]));
+    }
+
+    return map;
+  }
+
+  function createPairs(
+    xTimes,
+    xValues,
+    yTimes,
+    yValues
+  ) {
+    const xMap = createTimeMap(xTimes, xValues);
+    const yMap = createTimeMap(yTimes, yValues);
+
+    const pairs = [];
+
+    for (const [time, x] of xMap.entries()) {
+      if (!yMap.has(time)) continue;
+
+      const y = yMap.get(time);
+
+      if (!Number.isFinite(x) || !Number.isFinite(y)) {
+        continue;
+      }
+
+      pairs.push({ time, x, y });
+    }
+
+    return pairs.sort((a, b) =>
+      a.time.localeCompare(b.time)
+    );
+  }
+
+  // ==========================================
+  // PEARSON CORRELATION
+  // ==========================================
+
+  function calculatePearson(pairs) {
+
+    if (!Array.isArray(pairs) || pairs.length < MIN_SAMPLES) {
+      return {
+        ok: false,
+        reason: `At least ${MIN_SAMPLES} matching observations are required.`,
+        samples: pairs?.length || 0
+      };
+    }
+
+    const count = pairs.length;
+
+    const xValues = pairs.map(p => p.x);
+    const yValues = pairs.map(p => p.y);
+
+    const meanX =
+      xValues.reduce((sum, value) => sum + value, 0) / count;
+
+    const meanY =
+      yValues.reduce((sum, value) => sum + value, 0) / count;
+
+    let numerator = 0;
+    let sumSquareX = 0;
+    let sumSquareY = 0;
+
+    for (let i = 0; i < count; i++) {
+
+      const dx = xValues[i] - meanX;
+      const dy = yValues[i] - meanY;
+
+      numerator += dx * dy;
+      sumSquareX += dx * dx;
+      sumSquareY += dy * dy;
+    }
+
+    const denominator = Math.sqrt(
+      sumSquareX * sumSquareY
+    );
+
+    if (denominator === 0 || !Number.isFinite(denominator)) {
+      return {
+        ok: false,
+        reason: "Insufficient variation in the available values.",
+        samples: count
+      };
+    }
+
+    const coefficient = Math.max(
+      -1,
+      Math.min(1, numerator / denominator)
+    );
+
+    return {
+      ok: true,
+      coefficient,
+      relationship: getRelationship(coefficient),
+      samples: count,
+      meanX,
+      meanY,
+      pairs
+    };
+  }
+
+  // ==========================================
+  // ANALYSIS DEFINITIONS
+  // ==========================================
+
+  const definitions = [
+    {
+      id: "temperatureHumidity",
+      title: "Temperature vs Humidity",
+      description: "Relationship between air temperature and relative humidity.",
+      xLabel: "Temperature",
+      yLabel: "Relative humidity",
+      xUnit: "°C",
+      yUnit: "%",
+      source: "Weather forecast",
+      getPairs(weather, air) {
+        const h = weather?.hourly;
+
+        return createPairs(
+          h?.time,
+          h?.temperature_2m,
+          h?.time,
+          h?.relative_humidity_2m
+        );
+      }
+    },
+
+    {
+      id: "rainfallSoil",
+      title: "Rainfall vs Soil Moisture",
+      description: "Relationship between hourly precipitation and topsoil moisture.",
+      xLabel: "Rainfall",
+      yLabel: "Soil moisture",
+      xUnit: "mm",
+      yUnit: "m³/m³",
+      source: "Weather and soil model",
+      getPairs(weather, air) {
+        const h = weather?.hourly;
+
+        return createPairs(
+          h?.time,
+          h?.precipitation,
+          h?.time,
+          h?.soil_moisture_0_to_1cm
+        );
+      }
+    },
+
+    {
+      id: "temperatureAQI",
+      title: "Temperature vs AQI",
+      description: "Relationship between air temperature and US Air Quality Index.",
+      xLabel: "Temperature",
+      yLabel: "US AQI",
+      xUnit: "°C",
+      yUnit: "AQI",
+      source: "Weather and air-quality forecast",
+      getPairs(weather, air) {
+        const w = weather?.hourly;
+        const a = air?.hourly;
+
+        return createPairs(
+          w?.time,
+          w?.temperature_2m,
+          a?.time,
+          a?.us_aqi
+        );
+      }
+    },
+
+    {
+      id: "windRainfall",
+      title: "Wind Speed vs Rainfall",
+      description: "Relationship between hourly wind speed and precipitation.",
+      xLabel: "Wind speed",
+      yLabel: "Rainfall",
+      xUnit: "km/h",
+      yUnit: "mm",
+      source: "Weather forecast",
+      getPairs(weather, air) {
+        const h = weather?.hourly;
+
+        return createPairs(
+          h?.time,
+          h?.wind_speed_10m,
+          h?.time,
+          h?.precipitation
+        );
+      }
+    }
+  ];
+
+  // ==========================================
+  // RUN ANALYSIS
+  // ==========================================
+
+  async function analyze(lat, lng) {
+
+    if (!window.TERRON_API?.getCorrelationData) {
+      throw new Error(
+        "Correlation data service is unavailable. Check api.js."
+      );
+    }
+
+    const result = await window.TERRON_API.getCorrelationData(
+      Number(lat),
+      Number(lng)
+    );
+
+    const weatherSource = result?.weather;
+    const airSource = result?.air;
+
+    const weather = weatherSource?.ok
+      ? weatherSource.data
+      : null;
+
+    const air = airSource?.ok
+      ? airSource.data
+      : null;
+
+    const analyses = definitions.map(definition => {
+
+      let pairs = [];
+
+      try {
+        pairs = definition.getPairs(weather, air);
+      } catch (error) {
+        pairs = [];
+      }
+
+      const calculation = calculatePearson(pairs);
+
+      return {
+        id: definition.id,
+        title: definition.title,
+        description: definition.description,
+        xLabel: definition.xLabel,
+        yLabel: definition.yLabel,
+        xUnit: definition.xUnit,
+        yUnit: definition.yUnit,
+        source: definition.source,
+        ...calculation
+      };
+    });
+
+    return {
+      generatedAt: new Date().toISOString(),
+      weatherAvailable: Boolean(weatherSource?.ok),
+      airAvailable: Boolean(airSource?.ok),
+      weatherError: weatherSource?.error || null,
+      airError: airSource?.error || null,
+      analyses
+    };
+  }
+
+  // ==========================================
+  // SCATTER PLOT
+  // ==========================================
+
+  function createScatterPlot(analysis) {
+
+    if (!analysis.ok) {
+      return `
+        <div class="correlation-chart-unavailable">
+          ${escapeHTML(analysis.reason)}
+        </div>
+      `;
+    }
+
+    const width = 520;
+    const height = 220;
+    const padding = 35;
+
+    const pairs = analysis.pairs;
+
+    const xValues = pairs.map(p => p.x);
+    const yValues = pairs.map(p => p.y);
+
+    const minX = Math.min(...xValues);
+    const maxX = Math.max(...xValues);
+    const minY = Math.min(...yValues);
+    const maxY = Math.max(...yValues);
+
+    const rangeX = maxX - minX || 1;
+    const rangeY = maxY - minY || 1;
+
+    const points = pairs.map(pair => {
+
+      const x =
+        padding +
+        ((pair.x - minX) / rangeX) *
+        (width - padding * 2);
+
+      const y =
+        height - padding -
+        ((pair.y - minY) / rangeY) *
+        (height - padding * 2);
+
+      return { x, y };
+    });
+
+    const circles = points.map(point => `
+      <circle
+        cx="${point.x.toFixed(2)}"
+        cy="${point.y.toFixed(2)}"
+        r="3.5"
+        fill="#00d5ff"
+        opacity="0.8"
+      />
+    `).join("");
+
+    return `
+      <div class="correlation-chart">
+        <svg
+          viewBox="0 0 ${width} ${height}"
+          role="img"
+          aria-label="${escapeHTML(analysis.title)} scatter plot"
+        >
+
+          <line
+            x1="${padding}"
+            y1="${padding}"
+            x2="${padding}"
+            y2="${height - padding}"
+            stroke="#46677e"
+          />
+
+          <line
+            x1="${padding}"
+            y1="${height - padding}"
+            x2="${width - padding}"
+            y2="${height - padding}"
+            stroke="#46677e"
+          />
+
+          <line
+            x1="${padding}"
+            y1="${height / 2}"
+            x2="${width - padding}"
+            y2="${height / 2}"
+            stroke="#294052"
+            stroke-dasharray="4 5"
+          />
+
+          ${circles}
+
+          <text
+            x="${width / 2}"
+            y="${height - 5}"
+            fill="#8daabd"
+            font-size="10"
+            text-anchor="middle"
+          >
+            ${escapeHTML(analysis.xLabel)} (${escapeHTML(analysis.xUnit)})
+          </text>
+
+          <text
+            x="12"
+            y="${height / 2}"
+            fill="#8daabd"
+            font-size="10"
+            text-anchor="middle"
+            transform="rotate(-90 12 ${height / 2})"
+          >
+            ${escapeHTML(analysis.yLabel)}
+          </text>
+
+        </svg>
+      </div>
+    `;
+  }
+
+  // ==========================================
+  // RESULT CARD
+  // ==========================================
+
+  function renderAnalysisCard(analysis) {
+
+    if (!analysis.ok) {
+      return `
+        <article class="terron-correlation-result">
+
+          <div class="correlation-result-heading">
+            <h4>${escapeHTML(analysis.title)}</h4>
+            <span class="correlation-unavailable">
+              INSUFFICIENT DATA
+            </span>
+          </div>
+
+          <p class="data-error">
+            ${escapeHTML(analysis.reason)}
+          </p>
+
+          <p class="data-footnote">
+            Matching observations: ${analysis.samples || 0}
+          </p>
+
+        </article>
+      `;
+    }
+
+    const coefficient = analysis.coefficient;
+    const percentage = ((coefficient + 1) / 2) * 100;
+
+    return `
+      <article class="terron-correlation-result">
+
+        <div class="correlation-result-heading">
+
+          <div>
+            <div class="panel-kicker">CORRELATION RESULT</div>
+            <h4>${escapeHTML(analysis.title)}</h4>
+          </div>
+
+          <span class="correlation-relationship">
+            ${escapeHTML(analysis.relationship)}
+          </span>
+
+        </div>
+
+        <div class="correlation-main-value">
+          <strong>${coefficient.toFixed(3)}</strong>
+          <span>Pearson r</span>
+        </div>
+
+        <div class="correlation-scale">
+
+          <div class="correlation-scale-labels">
+            <span>-1 Negative</span>
+            <span>0 Neutral</span>
+            <span>+1 Positive</span>
+          </div>
+
+          <div class="correlation-scale-track">
+            <div
+              class="correlation-scale-marker"
+              style="left:${percentage.toFixed(2)}%"
+            ></div>
+          </div>
+
+        </div>
+
+        <div class="correlation-result-meta">
+          <span>Samples: ${analysis.samples}</span>
+          <span>Source: ${escapeHTML(analysis.source)}</span>
+        </div>
+
+        <p class="data-footnote">
+          ${escapeHTML(analysis.description)}
+        </p>
+
+        ${createScatterPlot(analysis)}
+
+      </article>
+    `;
+  }
+
+  // ==========================================
+  // RENDER ALL RESULTS
+  // ==========================================
+
+  function render(result) {
+
+    if (!result || !Array.isArray(result.analyses)) {
+      return `
+        <p class="data-error">
+          No correlation results are available.
+        </p>
+      `;
+    }
+
+    const cards = result.analyses
+      .map(renderAnalysisCard)
+      .join("");
+
+    return `
+      <div class="terron-correlation-summary">
+
+        <div class="metrics-grid">
+          <article class="metric-card">
+            <div class="metric-top">ANALYSES</div>
+            <strong class="metric-value">
+              ${result.analyses.length}
+            </strong>
+            <div class="metric-foot">Requested relationships</div>
+          </article>
+
+          <article class="metric-card">
+            <div class="metric-top">COMPLETED</div>
+            <strong class="metric-value">
+              ${result.analyses.filter(item => item.ok).length}
+            </strong>
+            <div class="metric-foot">Valid calculations</div>
+          </article>
+
+          <article class="metric-card">
+            <div class="metric-top">INSUFFICIENT DATA</div>
+            <strong class="metric-value">
+              ${result.analyses.filter(item => !item.ok).length}
+            </strong>
+            <div class="metric-foot">Unable to calculate</div>
+          </article>
+        </div>
+
+        <p class="data-footnote">
+          Analysis generated: ${new Date(result.generatedAt).toLocaleString()}
+        </p>
+
+        ${!result.weatherAvailable ? `
+          <p class="data-error">
+            Weather source unavailable:
+            ${escapeHTML(result.weatherError || "No response")}
+          </p>
+        ` : ""}
+
+        ${!result.airAvailable ? `
+          <p class="data-error">
+            Air-quality source unavailable:
+            ${escapeHTML(result.airError || "No response")}
+          </p>
+        ` : ""}
+
+        <div class="terron-correlation-result-grid">
+          ${cards}
+        </div>
+
+      </div>
+    `;
+  }
+
+  // ==========================================
+  // PUBLIC METHODS
+  // ==========================================
+
+  return {
+    analyze,
+    render,
+    calculatePearson,
+    getRelationship
+  };
+
+})();

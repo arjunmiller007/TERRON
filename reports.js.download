@@ -1,0 +1,338 @@
+"use strict";
+
+window.TERRON_REPORTS = (() => {
+
+  function escapeCSV(value) {
+    const text = String(value ?? "Unavailable");
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+
+  function downloadFile(content, filename, type) {
+    const blob = new Blob([content], { type });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function collect(data, location) {
+    const rows = [];
+
+    function add(category, metric, reading, unit, source) {
+      rows.push({
+        category,
+        metric,
+        reading: reading ?? "Unavailable",
+        unit: unit || "",
+        source
+      });
+    }
+
+    const weather = data.location.weather;
+    const air = data.location.air;
+    const marine = data.location.marine;
+
+    const weatherCurrent = weather?.data?.current;
+    const airCurrent = air?.data?.current;
+    const marineCurrent = marine?.data?.current;
+
+    [
+      ["Temperature", "temperature_2m", "°C"],
+      ["Feels like", "apparent_temperature", "°C"],
+      ["Humidity", "relative_humidity_2m", "%"],
+      ["Wind speed", "wind_speed_10m", "km/h"],
+      ["Wind direction", "wind_direction_10m", "°"],
+      ["Precipitation", "precipitation", "mm"],
+      ["Surface pressure", "surface_pressure", "hPa"],
+      ["Cloud cover", "cloud_cover", "%"]
+    ].forEach(([label, key, unit]) => {
+      add(
+        "Weather",
+        label,
+        weatherCurrent?.[key],
+        unit,
+        "Open-Meteo Weather API"
+      );
+    });
+
+    [
+      ["European AQI", "european_aqi"],
+      ["US AQI", "us_aqi"],
+      ["PM2.5", "pm2_5"],
+      ["PM10", "pm10"],
+      ["Nitrogen dioxide", "nitrogen_dioxide"],
+      ["Ozone", "ozone"],
+      ["Carbon monoxide", "carbon_monoxide"],
+      ["Sulphur dioxide", "sulphur_dioxide"]
+    ].forEach(([label, key]) => {
+      add(
+        "Environment",
+        label,
+        airCurrent?.[key],
+        key.includes("aqi") ? "index" : "µg/m³",
+        "Open-Meteo Air Quality API"
+      );
+    });
+
+    [
+      ["Wave height", "wave_height", "m"],
+      ["Wave direction", "wave_direction", "°"],
+      ["Wave period", "wave_period", "s"],
+      ["Sea surface temperature", "sea_surface_temperature", "°C"]
+    ].forEach(([label, key, unit]) => {
+      add(
+        "Ocean",
+        label,
+        marineCurrent?.[key],
+        unit,
+        "Open-Meteo Marine API"
+      );
+    });
+
+    const earthquakes =
+      data.global.earthquakes?.data?.features || [];
+
+    add(
+      "Disaster",
+      "Past-day earthquake count",
+      data.global.earthquakes?.ok
+        ? earthquakes.length
+        : "Unavailable",
+      "events",
+      "USGS"
+    );
+
+    const events = data.global.events?.data?.events || [];
+
+    add(
+      "Nature",
+      "Open natural events",
+      data.global.events?.ok
+        ? events.length
+        : "Unavailable",
+      "events",
+      "NASA EONET"
+    );
+
+    return {
+      location,
+      generatedAt: new Date().toISOString(),
+      rows,
+      earthquakes,
+      events
+    };
+  }
+
+  function exportCSV(data, location) {
+    const report = collect(data, location);
+
+    const headers = [
+      "Category",
+      "Metric",
+      "Reading",
+      "Unit",
+      "Source",
+      "Location",
+      "Generated At"
+    ];
+
+    const lines = [
+      headers.map(escapeCSV).join(","),
+      ...report.rows.map(row => [
+        row.category,
+        row.metric,
+        row.reading,
+        row.unit,
+        row.source,
+        report.location.name,
+        report.generatedAt
+      ].map(escapeCSV).join(","))
+    ];
+
+    const filename =
+      `TERRON_Data_${Date.now()}.csv`;
+
+    downloadFile(
+      "\uFEFF" + lines.join("\r\n"),
+      filename,
+      "text/csv;charset=utf-8"
+    );
+
+    return report;
+  }
+
+  function generateHTML(data, location) {
+    const report = collect(data, location);
+
+    const tableRows = report.rows.map(row => `
+      <tr>
+        <td>${safe(row.category)}</td>
+        <td>${safe(row.metric)}</td>
+        <td>${safe(row.reading)}</td>
+        <td>${safe(row.unit)}</td>
+        <td>${safe(row.source)}</td>
+      </tr>
+    `).join("");
+
+    const earthquakeRows = report.earthquakes
+      .slice(0, 20)
+      .map(event => `
+        <tr>
+          <td>${safe(event.properties?.mag)}</td>
+          <td>${safe(event.properties?.place)}</td>
+          <td>${safe(
+            event.properties?.time
+              ? new Date(event.properties.time).toLocaleString()
+              : "Unavailable"
+          )}</td>
+        </tr>
+      `).join("");
+
+    const eventRows = report.events
+      .slice(0, 20)
+      .map(event => `
+        <tr>
+          <td>${safe(event.title)}</td>
+          <td>${safe(
+            event.categories?.map(c => c.title).join(", ")
+          )}</td>
+        </tr>
+      `).join("");
+
+    return `
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <title>TERRON Intelligence Report</title>
+        <style>
+          body {
+            font-family: Arial, sans-serif;
+            color: #172033;
+            margin: 35px;
+            line-height: 1.5;
+          }
+          h1 { color: #087fba; }
+          h2 {
+            margin-top: 30px;
+            border-bottom: 2px solid #087fba;
+            padding-bottom: 8px;
+          }
+          table {
+            border-collapse: collapse;
+            width: 100%;
+            margin-top: 15px;
+          }
+          th, td {
+            border: 1px solid #ccd5df;
+            padding: 9px;
+            text-align: left;
+            font-size: 12px;
+          }
+          th { background: #eaf4fa; }
+          .note { color: #536273; font-size: 12px; }
+          @media print {
+            body { margin: 15mm; }
+          }
+        </style>
+      </head>
+      <body>
+        <h1>TERRON — Earth Intelligence</h1>
+        <h2>Intelligence Data Report</h2>
+
+        <p><strong>Location:</strong>
+          ${safe(report.location.name)}</p>
+        <p><strong>Coordinates:</strong>
+          ${safe(report.location.lat)},
+          ${safe(report.location.lng)}</p>
+        <p><strong>Generated:</strong>
+          ${safe(new Date(report.generatedAt).toLocaleString())}</p>
+
+        <h2>Environmental and Earth Readings</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Category</th>
+              <th>Metric</th>
+              <th>Reading</th>
+              <th>Unit</th>
+              <th>Source</th>
+            </tr>
+          </thead>
+          <tbody>${tableRows}</tbody>
+        </table>
+
+        <h2>Recent Earthquakes</h2>
+        <table>
+          <thead>
+            <tr><th>Magnitude</th><th>Location</th><th>Time</th></tr>
+          </thead>
+          <tbody>
+            ${earthquakeRows || "<tr><td colspan='3'>No records available</td></tr>"}
+          </tbody>
+        </table>
+
+        <h2>NASA Natural Events</h2>
+        <table>
+          <thead><tr><th>Event</th><th>Category</th></tr></thead>
+          <tbody>
+            ${eventRows || "<tr><td colspan='2'>No records available</td></tr>"}
+          </tbody>
+        </table>
+
+        <p class="note">
+          Weather, air-quality and marine values may be model-based.
+          Unavailable values are not replaced with invented readings.
+          This report is informational and is not an official warning.
+        </p>
+
+        <button onclick="window.print()">Print / Save as PDF</button>
+      </body>
+      </html>
+    `;
+  }
+
+  function safe(value) {
+    return String(value ?? "Unavailable").replace(
+      /[&<>"']/g,
+      char => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+      })[char]
+    );
+  }
+
+  function exportReport(data, location) {
+    const html = generateHTML(data, location);
+
+    const blob = new Blob([html], {
+      type: "text/html;charset=utf-8"
+    });
+
+    const url = URL.createObjectURL(blob);
+    const reportWindow = window.open(url, "_blank");
+
+    if (!reportWindow) {
+      downloadFile(
+        html,
+        "TERRON_Intelligence_Report.html",
+        "text/html;charset=utf-8"
+      );
+    }
+  }
+
+  return {
+    collect,
+    exportCSV,
+    exportReport
+  };
+})();
